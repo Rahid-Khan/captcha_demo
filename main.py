@@ -2,204 +2,174 @@ import streamlit as st
 import easyocr
 import cv2
 import numpy as np
-from PIL import Image
 import pandas as pd
 import re
-import os
+from PIL import Image
 
-# ---------------------------------------
-# Page Config
-# ---------------------------------------
-st.set_page_config(page_title="Smart CAPTCHA Solver", page_icon="🔍")
+# ======================================================
+# PAGE CONFIG
+# ======================================================
+st.set_page_config(
+    page_title="Smart CAPTCHA Solver",
+    page_icon="🔍",
+    layout="wide"
+)
 
 st.title("🔍 Smart Grid CAPTCHA Solver")
-st.write("Automatically reads instruction → detects target number → finds matching tiles")
+st.caption("Instruction → Target number → Tile detection → Structured output")
 
-# =======================================
-# EASY OCR (LOCAL MODELS ONLY)
-# =======================================
+
+# ======================================================
+# LOAD OCR (CACHED + AUTO DOWNLOAD)
+# ======================================================
 @st.cache_resource
 def load_reader():
-    """
-    Smart loader:
-    • First run → downloads models automatically
-    • Later runs → loads from local folder
-    """
-
-    model_path = "models"
-    os.makedirs(model_path, exist_ok=True)
-
-    model_file = os.path.join(model_path, "craft_mlt_25k.pth")
-
-    if not os.path.exists(model_file):
-        st.info("⬇️ First run: downloading EasyOCR models (one-time setup)...")
-
-        # allow download
-        reader = easyocr.Reader(
-            ['en'],
-            gpu=False,
-            model_storage_directory=model_path,
-            download_enabled=True
-        )
-
-        st.success("✅ Models downloaded and cached locally")
-        return reader
-
-    # models already exist → no download
     return easyocr.Reader(
         ['en'],
-        gpu=False,
-        model_storage_directory=model_path,
-        download_enabled=False
+        gpu=False,                       # Streamlit Cloud CPU only
+        download_enabled=True,           # auto download first run
+        model_storage_directory=".easyocr"
     )
-
 
 reader = load_reader()
 
 
-# =======================================
-# IMAGE ENHANCEMENT (Zoom + Sharpen + Denoise)
-# =======================================
-def enhance_image(img, scale=2):
+# ======================================================
+# IMAGE ENHANCEMENT
+# ======================================================
+def enhance(img, scale=2):
     h, w = img.shape[:2]
 
-    zoomed = cv2.resize(
-        img,
-        (w * scale, h * scale),
-        interpolation=cv2.INTER_CUBIC
-    )
+    zoom = cv2.resize(img, (w*scale, h*scale), interpolation=cv2.INTER_CUBIC)
 
-    denoise = cv2.bilateralFilter(zoomed, 9, 75, 75)
+    gray = cv2.cvtColor(zoom, cv2.COLOR_BGR2GRAY)
 
-    kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
-    sharp = cv2.filter2D(denoise, -1, kernel)
+    sharp_kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
+    sharp = cv2.filter2D(gray, -1, sharp_kernel)
 
     return sharp
 
 
-# =======================================
-# DETECT INSTRUCTION + TARGET NUMBER
-# =======================================
-def extract_target_number(img):
+# ======================================================
+# EXTRACT INSTRUCTION NUMBER
+# ======================================================
+def get_target_number(img):
+    text_list = reader.readtext(img, detail=0)
+    full_text = " ".join(text_list).lower()
 
-    results = reader.readtext(
-        img,
-        detail=0,
-        paragraph=True
-    )
-
-    text = " ".join(results).lower()
-
-    match = re.search(r'number\s*(\d+)', text)
+    match = re.search(r'number\s*(\d+)', full_text)
 
     if match:
-        return match.group(1), text
+        return match.group(1), full_text
 
-    return None, text
+    return None, full_text
 
 
-# =======================================
-# PREPROCESS TILE
-# =======================================
+# ======================================================
+# TILE PREPROCESS
+# ======================================================
 def preprocess_tile(tile):
+    blur = cv2.GaussianBlur(tile, (3,3), 0)
 
-    gray = cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY)
-
-    blur = cv2.GaussianBlur(gray, (3,3), 0)
-
-    thresh = cv2.adaptiveThreshold(
+    th = cv2.adaptiveThreshold(
         blur, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
         11, 2
     )
 
-    kernel = np.ones((2, 2), np.uint8)
-    clean = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-    return clean
+    return th
 
 
-# =======================================
+# ======================================================
 # SPLIT GRID
-# =======================================
+# ======================================================
 def split_grid(img, rows, cols):
-
-    h, w = img.shape[:2]
+    h, w = img.shape
     th, tw = h // rows, w // cols
 
     tiles = []
-
     for r in range(rows):
         for c in range(cols):
-            tiles.append(img[r*th:(r+1)*th, c*tw:(c+1)*tw])
+            tile = img[r*th:(r+1)*th, c*tw:(c+1)*tw]
+            tiles.append(tile)
 
     return tiles
 
 
-# =======================================
-# OCR TILE
-# =======================================
+# ======================================================
+# READ TILE OCR
+# ======================================================
 def read_tile(tile):
-
     processed = preprocess_tile(tile)
 
-    results = reader.readtext(
+    result = reader.readtext(
         processed,
         allowlist="0123456789",
         detail=1
     )
 
-    if not results:
+    if not result:
         return "", 0, processed
 
-    text = "".join([r[1] for r in results])
-    conf = round(np.mean([r[2] for r in results]), 2)
+    text = "".join([r[1] for r in result])
+    conf = round(np.mean([r[2] for r in result]), 2)
 
     text = re.sub(r'[^0-9]', '', text)
 
     return text, conf, processed
 
 
-# =======================================
+# ======================================================
 # UI
-# =======================================
-file = st.file_uploader("Upload CAPTCHA", type=["png", "jpg", "jpeg"])
+# ======================================================
+uploaded = st.file_uploader("Upload CAPTCHA image", type=["png","jpg","jpeg"])
 
-if file:
 
-    image = Image.open(file)
+if uploaded:
+
+    image = Image.open(uploaded).convert("RGB")
     img_np = np.array(image)
 
-    enhanced = enhance_image(img_np)
+    enhanced = enhance(img_np)
 
-    st.subheader("Enhanced Image (Zoomed)")
-    st.image(enhanced, use_container_width=True)
+    col1, col2 = st.columns(2)
 
-    # -----------------------------------
-    # STEP 1 → Extract instruction
-    # -----------------------------------
-    target, instruction_text = extract_target_number(enhanced)
+    with col1:
+        st.subheader("Original")
+        st.image(img_np, use_container_width=True)
+
+    with col2:
+        st.subheader("Enhanced (Zoom + Sharpen)")
+        st.image(enhanced, use_container_width=True)
+
+
+    # -------------------------
+    # STEP 1: Instruction OCR
+    # -------------------------
+    target, instruction = get_target_number(enhanced)
 
     st.subheader("Detected Instruction Text")
-    st.write(instruction_text)
+    st.write(instruction)
 
     if target:
-        st.success(f"🎯 Target Number Detected: {target}")
+        st.success(f"🎯 Target Number: {target}")
     else:
         st.warning("Target number not detected automatically")
+
 
     rows = st.slider("Rows", 2, 5, 3)
     cols = st.slider("Columns", 2, 5, 3)
 
-    # -----------------------------------
-    # STEP 2 → Detect tiles
-    # -----------------------------------
-    if st.button("🚀 Run Full Detection"):
+
+    # -------------------------
+    # STEP 2: Tiles OCR
+    # -------------------------
+    if st.button("🚀 Run Detection"):
 
         tiles = split_grid(enhanced, rows, cols)
 
-        data = []
+        results_data = []
         previews = []
 
         for i, tile in enumerate(tiles):
@@ -208,8 +178,8 @@ if file:
 
             match_flag = (text == target)
 
-            data.append({
-                "tile_id": i + 1,
+            results_data.append({
+                "tile_id": i+1,
                 "row": i // cols,
                 "col": i % cols,
                 "text": text,
@@ -219,20 +189,21 @@ if file:
 
             previews.append((processed, match_flag))
 
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(results_data)
 
-        st.subheader("📊 Structured OCR Results")
+        st.subheader("📊 Structured Results")
         st.dataframe(df, use_container_width=True)
 
         st.subheader("🎯 Matching Tiles")
-        st.dataframe(df[df["match_target"] == True], use_container_width=True)
+        st.write(df[df["match_target"] == True])
 
+        # grid preview
         st.subheader("🧩 Tile Preview")
         grid_cols = st.columns(cols)
 
-        for i, (p, match_flag) in enumerate(previews):
-            caption = "MATCH ✅" if match_flag else ""
-            grid_cols[i % cols].image(p, clamp=True, caption=caption)
+        for i, (img_tile, flag) in enumerate(previews):
+            caption = "MATCH ✅" if flag else ""
+            grid_cols[i % cols].image(img_tile, clamp=True, caption=caption)
 
 else:
-    st.info("Upload an image to start.")
+    st.info("Upload an image to start")
