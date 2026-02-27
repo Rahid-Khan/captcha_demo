@@ -21,24 +21,36 @@ st.write("Automatically reads instruction → detects target number → finds ma
 @st.cache_resource
 def load_reader():
     """
-    Loads EasyOCR using LOCAL models only.
-    Prevents downloading on Streamlit Cloud.
+    Smart loader:
+    • First run → downloads models automatically
+    • Later runs → loads from local folder
     """
 
     model_path = "models"
+    os.makedirs(model_path, exist_ok=True)
 
-    if not os.path.exists(model_path):
-        st.error(
-            "❌ 'models/' folder not found.\n\n"
-            "Run locally once to download EasyOCR models and copy them."
+    model_file = os.path.join(model_path, "craft_mlt_25k.pth")
+
+    if not os.path.exists(model_file):
+        st.info("⬇️ First run: downloading EasyOCR models (one-time setup)...")
+
+        # allow download
+        reader = easyocr.Reader(
+            ['en'],
+            gpu=False,
+            model_storage_directory=model_path,
+            download_enabled=True
         )
-        st.stop()
 
+        st.success("✅ Models downloaded and cached locally")
+        return reader
+
+    # models already exist → no download
     return easyocr.Reader(
         ['en'],
         gpu=False,
         model_storage_directory=model_path,
-        download_enabled=False  # IMPORTANT: disables internet download
+        download_enabled=False
     )
 
 
