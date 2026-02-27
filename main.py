@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image
 import pandas as pd
 import re
+import os
 
 # ---------------------------------------
 # Page Config
@@ -14,18 +15,38 @@ st.set_page_config(page_title="Smart CAPTCHA Solver", page_icon="🔍")
 st.title("🔍 Smart Grid CAPTCHA Solver")
 st.write("Automatically reads instruction → detects target number → finds matching tiles")
 
-# ---------------------------------------
-# Load EasyOCR
-# ---------------------------------------
+# =======================================
+# EASY OCR (LOCAL MODELS ONLY)
+# =======================================
 @st.cache_resource
 def load_reader():
-    return easyocr.Reader(['en'], gpu=False)
+    """
+    Loads EasyOCR using LOCAL models only.
+    Prevents downloading on Streamlit Cloud.
+    """
+
+    model_path = "models"
+
+    if not os.path.exists(model_path):
+        st.error(
+            "❌ 'models/' folder not found.\n\n"
+            "Run locally once to download EasyOCR models and copy them."
+        )
+        st.stop()
+
+    return easyocr.Reader(
+        ['en'],
+        gpu=False,
+        model_storage_directory=model_path,
+        download_enabled=False  # IMPORTANT: disables internet download
+    )
+
 
 reader = load_reader()
 
 
 # =======================================
-# IMAGE ENHANCEMENT (Zoom + Sharpen)
+# IMAGE ENHANCEMENT (Zoom + Sharpen + Denoise)
 # =======================================
 def enhance_image(img, scale=2):
     h, w = img.shape[:2]
@@ -36,9 +57,10 @@ def enhance_image(img, scale=2):
         interpolation=cv2.INTER_CUBIC
     )
 
-    # sharpening
+    denoise = cv2.bilateralFilter(zoomed, 9, 75, 75)
+
     kernel = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]])
-    sharp = cv2.filter2D(zoomed, -1, kernel)
+    sharp = cv2.filter2D(denoise, -1, kernel)
 
     return sharp
 
@@ -47,7 +69,12 @@ def enhance_image(img, scale=2):
 # DETECT INSTRUCTION + TARGET NUMBER
 # =======================================
 def extract_target_number(img):
-    results = reader.readtext(img, detail=0)
+
+    results = reader.readtext(
+        img,
+        detail=0,
+        paragraph=True
+    )
 
     text = " ".join(results).lower()
 
@@ -55,6 +82,7 @@ def extract_target_number(img):
 
     if match:
         return match.group(1), text
+
     return None, text
 
 
@@ -62,10 +90,13 @@ def extract_target_number(img):
 # PREPROCESS TILE
 # =======================================
 def preprocess_tile(tile):
+
     gray = cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY)
 
+    blur = cv2.GaussianBlur(gray, (3,3), 0)
+
     thresh = cv2.adaptiveThreshold(
-        gray, 255,
+        blur, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
         11, 2
@@ -81,13 +112,16 @@ def preprocess_tile(tile):
 # SPLIT GRID
 # =======================================
 def split_grid(img, rows, cols):
+
     h, w = img.shape[:2]
     th, tw = h // rows, w // cols
 
     tiles = []
+
     for r in range(rows):
         for c in range(cols):
             tiles.append(img[r*th:(r+1)*th, c*tw:(c+1)*tw])
+
     return tiles
 
 
@@ -95,11 +129,13 @@ def split_grid(img, rows, cols):
 # OCR TILE
 # =======================================
 def read_tile(tile):
+
     processed = preprocess_tile(tile)
 
     results = reader.readtext(
         processed,
-        allowlist="0123456789"
+        allowlist="0123456789",
+        detail=1
     )
 
     if not results:
@@ -155,6 +191,7 @@ if file:
         previews = []
 
         for i, tile in enumerate(tiles):
+
             text, conf, processed = read_tile(tile)
 
             match_flag = (text == target)
@@ -172,18 +209,12 @@ if file:
 
         df = pd.DataFrame(data)
 
-        # -----------------------------------
-        # STRUCTURED OUTPUT
-        # -----------------------------------
         st.subheader("📊 Structured OCR Results")
         st.dataframe(df, use_container_width=True)
 
         st.subheader("🎯 Matching Tiles")
-        st.write(df[df["match_target"] == True])
+        st.dataframe(df[df["match_target"] == True], use_container_width=True)
 
-        # -----------------------------------
-        # SHOW TILES
-        # -----------------------------------
         st.subheader("🧩 Tile Preview")
         grid_cols = st.columns(cols)
 
